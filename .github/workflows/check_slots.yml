@@ -1,0 +1,51 @@
+name: Pyszne Slot Monitor
+
+on:
+  schedule:
+    - cron: '*/10 5-21 * * *'
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: 'Telegram chat_id (puste = wszyscy)'
+        required: false
+        default: ''
+
+jobs:
+  check-slots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests pytz
+          playwright install chromium --with-deps
+
+      - name: Przygotuj USERS_CONFIG
+        env:
+          COOKIES_YEVHEN: ${{ secrets.COOKIES_YEVHEN }}
+          COOKIES_KOLEGA: ${{ secrets.COOKIES_KOLEGA }}
+          CHAT_ID_YEVHEN: ${{ secrets.CHAT_ID_YEVHEN }}
+          CHAT_ID_KOLEGA: ${{ secrets.CHAT_ID_KOLEGA }}
+        run: python scripts/build_users_config.py
+
+      - name: Sprawdź sloty
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          USERS_CONFIG: ${{ env.USERS_CONFIG }}
+          TARGET_CHAT_ID: ${{ github.event.inputs.chat_id }}
+        run: python scripts/check_slots.py
+
+      - name: Log result
+        if: always()
+        run: echo "Zakończono $(date '+%Y-%m-%d %H:%M:%S UTC')"
+        
