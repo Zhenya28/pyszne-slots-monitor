@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pyszne.pl Slot Checker
+Pyszne.pl Slot Checker v2
 Sprawdza dostępne sloty w formularzu wymiany i powiadamia przez Telegram.
 """
 
@@ -8,15 +8,14 @@ import json
 import os
 import sys
 import time
-import pickle
 import base64
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 import pytz
 import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -24,65 +23,56 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Stałe ────────────────────────────────────────────────────────────────────
+# ── Stałe ─────────────────────────────────────────────────────────────────────
 FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLScb9idqew6_DKUuxw3Qlwi73F5TgsSb3Z6b2QU41egefYmfGw/viewform"
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 WARSAW_TZ = pytz.timezone("Europe/Warsaw")
 
-# ── Konfiguracja użytkowników (z GitHub Secrets / env) ───────────────────────
-def load_users() -> list[dict]:
-    """Ładuje użytkowników z env USERS_CONFIG (JSON base64)."""
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def load_users() -> list:
     raw = os.environ.get("USERS_CONFIG", "")
     if not raw:
-        log.error("Brak USERS_CONFIG w environment!")
+        log.error("Brak USERS_CONFIG!")
         sys.exit(1)
     try:
-        decoded = base64.b64decode(raw).decode("utf-8")
-        users = json.loads(decoded)
+        users = json.loads(base64.b64decode(raw).decode("utf-8"))
         log.info(f"Załadowano {len(users)} użytkowników.")
         return users
     except Exception as e:
-        log.error(f"Błąd parsowania USERS_CONFIG: {e}")
+        log.error(f"Błąd USERS_CONFIG: {e}")
         sys.exit(1)
 
 
-def load_cookies(b64_cookies: str) -> list[dict]:
-    """Dekoduje cookies z base64 JSON."""
+def load_cookies(b64: str) -> list:
     try:
-        decoded = base64.b64decode(b64_cookies).decode("utf-8")
-        return json.loads(decoded)
+        return json.loads(base64.b64decode(b64).decode("utf-8"))
     except Exception as e:
-        log.error(f"Błąd dekodowania cookies: {e}")
+        log.error(f"Błąd cookies: {e}")
         return []
 
 
-# ── Sprawdzanie harmonogramu ──────────────────────────────────────────────────
-def should_run_for_user(user: dict) -> bool:
-    """Sprawdza czy użytkownik powinien teraz dostać sprawdzenie."""
+def should_run(user: dict) -> bool:
     now = datetime.now(WARSAW_TZ)
-    weekday = now.isoweekday()  # 1=Pon, 7=Nd
+    weekday = now.isoweekday()
 
-    active_days = user.get("days", [1, 2, 3, 4, 5, 6, 7])
-    if weekday not in active_days:
-        log.info(f"[{user['name']}] Dzisiaj ({weekday}) nie jest dniem monitorowania.")
+    if weekday not in user.get("days", list(range(1, 8))):
+        log.info(f"[{user['name']}] Nie dzisiaj.")
         return False
 
-    hour_from = int(user.get("hour_from", 7))
-    hour_to = int(user.get("hour_to", 22))
-    current_hour = now.hour
-
-    if not (hour_from <= current_hour < hour_to):
-        log.info(f"[{user['name']}] Teraz {current_hour}:xx poza oknem {hour_from}-{hour_to}.")
+    h_from = int(user.get("hour_from", 7))
+    h_to = int(user.get("hour_to", 22))
+    if not (h_from <= now.hour < h_to):
+        log.info(f"[{user['name']}] Poza oknem {h_from}-{h_to}.")
         return False
 
     if not user.get("active", True):
-        log.info(f"[{user['name']}] Monitoring wyłączony (/pause).")
+        log.info(f"[{user['name']}] Wyłączony.")
         return False
 
-    # Sprawdź mute
-    mute_until = user.get("mute_until")
-    if mute_until:
-        mute_dt = datetime.fromisoformat(mute_until).astimezone(WARSAW_TZ)
+    mute = user.get("mute_until")
+    if mute:
+        mute_dt = datetime.fromisoformat(mute).astimezone(WARSAW_TZ)
         if now < mute_dt:
             log.info(f"[{user['name']}] Wyciszony do {mute_dt.strftime('%H:%M')}.")
             return False
@@ -90,207 +80,252 @@ def should_run_for_user(user: dict) -> bool:
     return True
 
 
-# ── Playwright — scraping formularza ─────────────────────────────────────────
-def get_slots_for_user(user: dict, playwright) -> list[str]:
-    """
-    Przechodzi przez formularz Pyszne.pl i zwraca listę dostępnych slotów
-    dla danej strefy użytkownika.
-    """
-    log.info(f"[{user['name']}] Sprawdzam sloty dla strefy: {user['zone']}")
+def click_next(page, timeout=15000):
+    """Kliknij przycisk Dalej/Next."""
+    selectors = [
+        'div[role="button"]:has-text("Dalej")',
+        'div[role="button"]:has-text("Next")',
+        'span:has-text("Dalej")',
+        'span:has-text("Next")',
+    ]
+    for sel in selectors:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=3000):
+                btn.click(timeout=timeout)
+                return True
+        except Exception:
+            continue
+    raise Exception("Nie znaleziono przycisku Dalej/Next")
+
+
+def click_radio(page, texts: list, timeout=20000):
+    """Kliknij radio button zawierający jeden z podanych tekstów."""
+    for text in texts:
+        selectors = [
+            f'div[role="radio"]:has-text("{text}")',
+            f'label:has-text("{text}")',
+            f'[data-value="{text}"]',
+        ]
+        for sel in selectors:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=3000):
+                    el.click(timeout=timeout)
+                    log.info(f"Kliknięto: {text}")
+                    return True
+            except Exception:
+                continue
+    raise Exception(f"Nie znaleziono radio dla: {texts}")
+
+
+# ── Główna funkcja scrapingu ───────────────────────────────────────────────────
+def get_slots(user: dict, playwright) -> list:
+    log.info(f"[{user['name']}] Sprawdzam: {user['zone']}")
 
     cookies = load_cookies(user.get("cookies_b64", ""))
     if not cookies:
-        log.error(f"[{user['name']}] Brak cookies — pomijam.")
+        log.error(f"[{user['name']}] Brak cookies!")
         return []
 
-    browser = playwright.chromium.launch(headless=True)
-    context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    browser = playwright.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-dev-shm-usage"]
     )
-
-    # Wgrywamy cookies Google
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1280, "height": 800},
+    )
     context.add_cookies(cookies)
     page = context.new_page()
-
     slots = []
 
     try:
-        # ── Strona 1: Email ──────────────────────────────────────────────────
-        log.info(f"[{user['name']}] Strona 1 — ładuję formularz...")
-        page.goto(FORM_URL, wait_until="networkidle", timeout=30000)
-        time.sleep(2)
+        # ── Strona 1: Email ───────────────────────────────────────────────────
+        log.info(f"[{user['name']}] Strona 1 — email...")
+        page.goto(FORM_URL, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(3)
 
-        # Wpisz email i kliknij Dalej
-        email_input = page.locator('input[type="email"]')
-        email_input.fill(user["email"])
-        time.sleep(0.5)
+        # Wpisz email
+        try:
+            email_inp = page.locator('input[type="email"]').first
+            email_inp.wait_for(timeout=10000)
+            email_inp.fill(user["email"])
+            time.sleep(0.5)
+            click_next(page)
+            time.sleep(3)
+        except Exception as e:
+            log.warning(f"[{user['name']}] Email step: {e} — może już zalogowany")
 
-        next_btn = page.locator('div[role="button"]:has-text("Dalej"), div[role="button"]:has-text("Next")')
-        next_btn.first.click()
-        time.sleep(2)
-
-        # ── Strona 2: Imię, ID, opcja ────────────────────────────────────────
+        # ── Strona 2: Imię, ID, opcja ─────────────────────────────────────────
         log.info(f"[{user['name']}] Strona 2 — dane kuriera...")
-
-        # Imię Nazwisko
-        name_input = page.locator('input[type="text"]').first
-        name_input.fill(user["name"])
-        time.sleep(0.3)
-
-        # ID kuriera (drugie pole tekstowe)
-        id_input = page.locator('input[type="text"]').nth(1)
-        id_input.fill(str(user["courier_id"]))
-        time.sleep(0.3)
-
-        # Wybierz "Chcę przyjąć"
-        accept_radio = page.locator('div[role="radio"]:has-text("Chcę przyjąć")')
-        accept_radio.click()
-        time.sleep(0.5)
-
-        next_btn = page.locator('div[role="button"]:has-text("Dalej"), div[role="button"]:has-text("Next")')
-        next_btn.first.click()
         time.sleep(2)
 
-        # ── Strona 3: Miasto ─────────────────────────────────────────────────
-        log.info(f"[{user['name']}] Strona 3 — miasto: {user['city']}")
-        city_radio = page.locator(f'div[role="radio"]:has-text("{user["city"]}")')
-        city_radio.click()
-        time.sleep(0.5)
+        # Wypełnij pola tekstowe
+        text_inputs = page.locator('input[type="text"]').all()
+        if len(text_inputs) >= 1:
+            text_inputs[0].fill(user["name"])
+            time.sleep(0.3)
+        if len(text_inputs) >= 2:
+            text_inputs[1].fill(str(user["courier_id"]))
+            time.sleep(0.3)
 
-        next_btn = page.locator('div[role="button"]:has-text("Dalej"), div[role="button"]:has-text("Next")')
-        next_btn.first.click()
-        time.sleep(2)
-
-        # ── Strona 4: Strefa ─────────────────────────────────────────────────
-        log.info(f"[{user['name']}] Strona 4 — strefa: {user['zone']}")
-        zone_radio = page.locator(f'div[role="radio"]:has-text("{user["zone"]}")')
-        zone_radio.click()
-        time.sleep(0.5)
-
-        next_btn = page.locator('div[role="button"]:has-text("Dalej"), div[role="button"]:has-text("Next")')
-        next_btn.first.click()
-        time.sleep(2)
-
-        # ── Strona 5: Dropdown ze slotami ────────────────────────────────────
-        log.info(f"[{user['name']}] Strona 5 — odczytuję sloty z dropdownu...")
-
-        # Kliknij dropdown żeby otworzyć opcje
-        dropdown = page.locator('[role="listbox"], select, [data-params*="slot"]').first
-        if not dropdown.is_visible():
-            # Fallback — szukaj po aria
-            dropdown = page.locator('[aria-label*="slot"], [aria-label*="Slot"]').first
-
-        dropdown.click()
+        # Wybierz "Chcę przyjąć" — próbuj różnych wariantów
+        log.info(f"[{user['name']}] Klikam 'Chcę przyjąć'...")
+        click_radio(page, [
+            "Chcę przyjąć",
+            "2. Chcę przyjąć",
+            "chcę przyjąć",
+            "I want to accept",
+            "accept",
+        ], timeout=30000)
         time.sleep(1)
 
-        # Zbierz wszystkie opcje
-        options = page.locator('[role="option"]').all()
-        for opt in options:
-            text = opt.inner_text().strip()
-            if text and text.lower() not in ["wybierz", "select", "--", ""]:
-                slots.append(text)
-                log.info(f"[{user['name']}] Znaleziony slot: {text}")
+        click_next(page)
+        time.sleep(3)
+
+        # ── Strona 3: Miasto ──────────────────────────────────────────────────
+        log.info(f"[{user['name']}] Strona 3 — miasto: {user['city']}")
+        click_radio(page, [user["city"]], timeout=20000)
+        time.sleep(0.5)
+        click_next(page)
+        time.sleep(3)
+
+        # ── Strona 4: Strefa ──────────────────────────────────────────────────
+        log.info(f"[{user['name']}] Strona 4 — strefa: {user['zone']}")
+        click_radio(page, [user["zone"]], timeout=20000)
+        time.sleep(0.5)
+        click_next(page)
+        time.sleep(3)
+
+        # ── Strona 5: Sloty ───────────────────────────────────────────────────
+        log.info(f"[{user['name']}] Strona 5 — czytam sloty...")
+        time.sleep(2)
+
+        # Pobierz cały tekst strony żeby zobaczyć co jest
+        page_text = page.inner_text("body")
+        log.info(f"[{user['name']}] Tekst strony (pierwsze 500 znaków):\n{page_text[:500]}")
+
+        # Spróbuj dropdown
+        dropdown_selectors = [
+            '[role="listbox"]',
+            'select',
+            '[jsname*="select"]',
+            '[data-params]',
+        ]
+        dropdown_found = False
+        for sel in dropdown_selectors:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=3000):
+                    el.click(timeout=5000)
+                    time.sleep(1)
+                    dropdown_found = True
+                    log.info(f"[{user['name']}] Dropdown otwarty: {sel}")
+                    break
+            except Exception:
+                continue
+
+        # Zbierz opcje
+        option_selectors = ['[role="option"]', 'option', 'li[data-value]']
+        for sel in option_selectors:
+            options = page.locator(sel).all()
+            for opt in options:
+                try:
+                    text = opt.inner_text().strip()
+                    if text and text.lower() not in ["wybierz", "select", "--", "", "choose"]:
+                        slots.append(text)
+                        log.info(f"[{user['name']}] SLOT: {text}")
+                except Exception:
+                    continue
+            if slots:
+                break
 
         if not slots:
-            log.info(f"[{user['name']}] Brak dostępnych slotów.")
+            log.info(f"[{user['name']}] Brak slotów.")
 
     except PlaywrightTimeout as e:
-        log.error(f"[{user['name']}] Timeout podczas sprawdzania: {e}")
+        log.error(f"[{user['name']}] Timeout: {e}")
     except Exception as e:
-        log.error(f"[{user['name']}] Błąd podczas sprawdzania: {e}")
+        log.error(f"[{user['name']}] Błąd: {e}")
     finally:
-        page.close()
-        context.close()
-        browser.close()
+        try:
+            page.close()
+            context.close()
+            browser.close()
+        except Exception:
+            pass
 
     return slots
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 def send_telegram(token: str, chat_id: str, text: str) -> bool:
-    """Wysyła wiadomość przez Telegram Bot API."""
     url = TELEGRAM_API.format(token=token)
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
     try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            log.info(f"Telegram wysłany do chat_id={chat_id}")
-            return True
+        resp = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                  "disable_web_page_preview": True},
+            timeout=10,
+        )
+        ok = resp.status_code == 200
+        if ok:
+            log.info(f"Telegram OK → {chat_id}")
         else:
-            log.error(f"Telegram error {resp.status_code}: {resp.text}")
-            return False
+            log.error(f"Telegram błąd {resp.status_code}: {resp.text}")
+        return ok
     except Exception as e:
-        log.error(f"Błąd wysyłania Telegram: {e}")
+        log.error(f"Telegram wyjątek: {e}")
         return False
 
 
-def format_slots_message(user: dict, slots: list[str]) -> str:
-    """Formatuje wiadomość z dostępnymi slotami."""
+def format_message(user: dict, slots: list) -> str:
     now = datetime.now(WARSAW_TZ)
-    time_str = now.strftime("%H:%M")
-    date_str = now.strftime("%d.%m.%Y")
-
     lines = [
         "🔔 <b>DOSTĘPNE SLOTY PYSZNE.PL</b>",
-        f"━━━━━━━━━━━━━━━━━",
+        "━━━━━━━━━━━━━━━━━",
         f"📍 Strefa: <b>{user['zone']}</b>",
-        f"🕐 Sprawdzono: {date_str} o {time_str}",
-        f"━━━━━━━━━━━━━━━━━",
+        f"🕐 {now.strftime('%d.%m.%Y %H:%M')}",
+        "━━━━━━━━━━━━━━━━━",
     ]
-
-    for slot in slots:
-        lines.append(f"✅ {slot}")
-
-    lines += [
-        f"━━━━━━━━━━━━━━━━━",
-        f'<a href="{FORM_URL}">📝 Otwórz formularz</a>',
-    ]
-
+    for s in slots:
+        lines.append(f"✅ {s}")
+    lines += ["━━━━━━━━━━━━━━━━━",
+              f'<a href="{FORM_URL}">📝 Otwórz formularz</a>']
     return "\n".join(lines)
-
-
-def format_no_slots_message(user: dict) -> str:
-    """Wiadomość gdy brak slotów — tylko do debug logu, nie wysyłamy na Telegram."""
-    now = datetime.now(WARSAW_TZ)
-    return f"[{user['name']}] Brak slotów o {now.strftime('%H:%M')}"
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    telegram_token = os.environ.get("TELEGRAM_TOKEN", "")
-    if not telegram_token:
-        log.error("Brak TELEGRAM_TOKEN w environment!")
+    token = os.environ.get("TELEGRAM_TOKEN", "")
+    if not token:
+        log.error("Brak TELEGRAM_TOKEN!")
         sys.exit(1)
 
     users = load_users()
 
-    with sync_playwright() as playwright:
+    with sync_playwright() as pw:
         for user in users:
-            log.info(f"\n{'='*50}")
-            log.info(f"Przetwarzam użytkownika: {user['name']}")
-
-            if not should_run_for_user(user):
+            log.info(f"\n{'='*50}\nUżytkownik: {user['name']}")
+            if not should_run(user):
                 continue
 
-            slots = get_slots_for_user(user, playwright)
+            slots = get_slots(user, pw)
 
             if slots:
-                msg = format_slots_message(user, slots)
-                send_telegram(telegram_token, user["chat_id"], msg)
+                send_telegram(token, user["chat_id"], format_message(user, slots))
             else:
-                log.info(format_no_slots_message(user))
-                # Opcjonalnie — wysyłaj "brak slotów" tylko jeśli user chce
-                if user.get("notify_empty", False):
-                    msg = f"😴 Brak slotów dla strefy <b>{user['zone']}</b>"
-                    send_telegram(telegram_token, user["chat_id"], msg)
+                log.info(f"[{user['name']}] Brak slotów o {datetime.now(WARSAW_TZ).strftime('%H:%M')}")
+                if user.get("notify_empty"):
+                    send_telegram(token, user["chat_id"],
+                                  f"😴 Brak slotów — {user['zone']}")
 
-    log.info("\nSprawdzanie zakończone.")
+    log.info("Koniec sprawdzania.")
 
 
 if __name__ == "__main__":
