@@ -65,7 +65,7 @@ Wejdź: `GitHub repo → Settings → Secrets and variables → Actions → New 
 | `COURIER_ID_KOLEGA` | jego ID kuriera |
 | `EMAIL_KOLEGA` | jego email Google |
 | `ZONE_KOLEGA` | jego strefa (np. `Praga-Poludnie`) |
-
+ 
 ---
 
 ### Krok 4 — Włącz GitHub Actions
