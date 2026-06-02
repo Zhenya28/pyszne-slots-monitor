@@ -2,7 +2,7 @@ name: Pyszne Slot Monitor
 
 on:
   schedule:
-    - cron: '*/10 5-21 * * *'
+    - cron: '*/5 5-21 * * *'
   workflow_dispatch:
     inputs:
       chat_id:
