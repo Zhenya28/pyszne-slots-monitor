@@ -436,9 +436,8 @@ def main():
                 log.info(f"[{user['name']}] 🎉 Przyjęto slot: {accepted_slot}")
 
             elif all_slots:
-                # Są sloty ale żaden nie spełnia kryteriów
-                msg = format_found_message(user, all_slots)
-                send_telegram(token, user["chat_id"], msg)
+              # Są sloty ale żaden nie spełnia kryteriów — cicho, nie wysyłaj
+                log.info(f"[{user['name']}] Sloty za krótkie — brak powiadomienia.")
                 log.info(f"[{user['name']}] Sloty znalezione ale żaden nie pasuje.")
 
             else:
