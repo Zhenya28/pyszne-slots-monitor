@@ -2,14 +2,13 @@
 """
 build_users_config.py
 Buduje USERS_CONFIG (base64 JSON) z GitHub Secrets i zapisuje do $GITHUB_ENV.
-Uruchamiany przez GitHub Actions przed check_slots.py.
 """
 
 import json
 import base64
 import os
 
-# Czytaj secrets z environment
+
 def env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
@@ -26,8 +25,8 @@ if yevhen_cookies and yevhen_chat_id:
         "courier_id": "913698",
         "email": "jeka.kapush@gmail.com",
         "city": "Warszawa",
-        "zone": "Center-Mokotow-Srodmiejscie",
-        "days": [1, 2, 3, 4, 5, 6, 7],   # Pon-Nd (bot/schedule zmieni przez Gist)
+        "zone": "Center-Mokotow-Srodmiescie",
+        "days": [1, 2, 3, 4, 5, 6, 7],
         "hour_from": 7,
         "hour_to": 22,
         "active": True,
@@ -36,7 +35,7 @@ if yevhen_cookies and yevhen_chat_id:
         "cookies_b64": yevhen_cookies,
         "notify_empty": False,
     })
-    print(f"✅ Załadowano użytkownika: Yevhen Kapush")
+    print("✅ Yevhen Kapush załadowany.")
 
 # ── Kolega ────────────────────────────────────────────────────────────────────
 kolega_cookies = env("COOKIES_KOLEGA")
@@ -62,40 +61,19 @@ if kolega_cookies and kolega_chat_id and kolega_name:
         "cookies_b64": kolega_cookies,
         "notify_empty": False,
     })
-    print(f"✅ Załadowano użytkownika: {kolega_name}")
-
-# ── Nadpisz ustawieniami z Gist (dni, godziny, active, mute) ─────────────────
-gist_config_b64 = env("GIST_CONFIG_SNAPSHOT")
-if gist_config_b64:
-    try:
-        gist_config = json.loads(base64.b64decode(gist_config_b64).decode())
-        for user in users:
-            chat_id = user["chat_id"]
-            if chat_id in gist_config:
-                override = gist_config[chat_id]
-                # Nadpisz tylko pola konfiguracyjne (nie dane logowania)
-                for field in ["days", "hour_from", "hour_to", "active", "mute_until", "zone", "notify_empty"]:
-                    if field in override:
-                        user[field] = override[field]
-                print(f"✅ Nadpisano ustawienia z Gist dla: {user['name']}")
-    except Exception as e:
-        print(f"⚠️ Błąd ładowania Gist config: {e} — używam domyślnych.")
+    print(f"✅ {kolega_name} załadowany.")
 
 if not users:
-    print("❌ Brak skonfigurowanych użytkowników!")
+    print("❌ Brak użytkowników!")
     exit(1)
 
 # ── Zapisz do $GITHUB_ENV ─────────────────────────────────────────────────────
-users_json = json.dumps(users, ensure_ascii=False)
-users_b64 = base64.b64encode(users_json.encode()).decode()
+users_b64 = base64.b64encode(json.dumps(users, ensure_ascii=False).encode()).decode()
 
-github_env_file = os.environ.get("GITHUB_ENV", "")
-if github_env_file:
-    with open(github_env_file, "a") as f:
-        # Multiline secret — GitHub Actions wymaga specjalnej składni
+github_env = os.environ.get("GITHUB_ENV", "")
+if github_env:
+    with open(github_env, "a") as f:
         f.write(f"USERS_CONFIG={users_b64}\n")
-    print(f"✅ USERS_CONFIG zapisany do GITHUB_ENV ({len(users)} użytkowników)")
+    print(f"✅ USERS_CONFIG zapisany ({len(users)} użytkowników).")
 else:
-    # Lokalny test
-    print(f"\nUSERS_CONFIG={users_b64[:60]}...")
-    print(f"✅ Gotowe ({len(users)} użytkowników)")
+    print(f"USERS_CONFIG={users_b64[:60]}...")
