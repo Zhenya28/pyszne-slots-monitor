@@ -2,7 +2,7 @@ name: Pyszne Slot Monitor
 
 on:
   schedule:
-    - cron: '*/5 5-21 * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       chat_id:
@@ -48,4 +48,3 @@ jobs:
       - name: Log result
         if: always()
         run: echo "Zakończono $(date '+%Y-%m-%d %H:%M:%S UTC')"
-        
